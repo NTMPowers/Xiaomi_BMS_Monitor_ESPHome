@@ -149,6 +149,7 @@ bool XiaomiBMSComponent::check_crc_(const std::vector<uint8_t> &data) {
 }
 
 // Read one complete, CRC-valid packet within timeout_ms milliseconds.
+// Uses a single flat loop – no nested sub-timeouts that can misfire on ESP8266.
 bool XiaomiBMSComponent::read_packet_(uint32_t timeout_ms, std::vector<uint8_t> &out) {
   out.clear();
   uint8_t state = 0;
@@ -156,31 +157,42 @@ bool XiaomiBMSComponent::read_packet_(uint32_t timeout_ms, std::vector<uint8_t> 
 
   while (millis() < deadline) {
     if (!available()) {
-      yield();
+      delay(1);
       continue;
     }
 
-    uint8_t byte = read();
+    uint8_t b = read();
 
     switch (state) {
       case 0:
-        if (byte == 0x55) { out = {byte}; state = 1; }
+        if (b == 0x55) { out.clear(); out.push_back(b); state = 1; }
         break;
       case 1:
-        if (byte == 0xAA) { out.push_back(byte); state = 2; }
-        else              { out.clear(); state = 0; }
+        if (b == 0xAA) { out.push_back(b); state = 2; }
+        else           { out.clear(); state = 0; }
         break;
       default:
-        out.push_back(byte);
-        // Complete when we have received exactly (length_field + 6) bytes
+        out.push_back(b);
         if (out.size() > 2 && out.size() == (size_t)(out[2] + 6)) {
-          if (check_crc_(out)) return true;
-          // Bad CRC – restart scan
+          if (check_crc_(out)) {
+            return true;
+          }
+          // Bad CRC – log and restart
+          std::string bad;
+          for (auto x : out) { char tmp[4]; snprintf(tmp, sizeof(tmp), "%02X ", x); bad += tmp; }
+          ESP_LOGW(TAG, "Bad CRC: %s", bad.c_str());
           out.clear();
           state = 0;
         }
         break;
     }
+  }
+
+  // Timeout – log whatever we received so far to aid debugging
+  if (!out.empty()) {
+    std::string partial;
+    for (auto x : out) { char tmp[4]; snprintf(tmp, sizeof(tmp), "%02X ", x); partial += tmp; }
+    ESP_LOGW(TAG, "Timeout with partial packet (%d bytes): %s", (int)out.size(), partial.c_str());
   }
   return false;
 }
@@ -191,37 +203,39 @@ bool XiaomiBMSComponent::read_chunk_(uint8_t byte_offset, uint8_t size) {
   std::vector<uint8_t> request;
   build_request_(offset_word, size, request);
 
-  // Log the outgoing request frame for debugging
+  // Always log TX frame at WARN level until we get a successful decode
   std::string hex;
-  for (auto b : request) {
-    char buf[4];
-    snprintf(buf, sizeof(buf), "%02X ", b);
-    hex += buf;
-  }
-  ESP_LOGV(TAG, "TX [offset=0x%02X]: %s", byte_offset, hex.c_str());
+  for (auto b : request) { char buf[4]; snprintf(buf, sizeof(buf), "%02X ", b); hex += buf; }
+  ESP_LOGD(TAG, "TX offset=0x%02X: %s", byte_offset, hex.c_str());
 
-  drain_rx_();  // clear stale RX bytes before sending
+  drain_rx_();
   write_array(request.data(), request.size());
 
-  uint32_t deadline = millis() + 350;  // 350 ms total window (mirrors Python REQUEST_TIMEOUT)
+  // Single 500 ms window – collect any valid packet aimed at our offset
+  std::vector<uint8_t> pkt;
+  uint32_t deadline = millis() + 500;
 
   while (millis() < deadline) {
-    std::vector<uint8_t> pkt;
     uint32_t remaining = deadline - millis();
     if (remaining == 0) break;
 
-    if (!read_packet_(std::min(remaining, (uint32_t)80), pkt)) continue;
+    pkt.clear();
+    if (!read_packet_(remaining, pkt)) break;  // timed out
 
-    // Accept only response packets (mode == 0x01) at the expected offset
+    // Log every received packet
+    std::string rx;
+    for (auto b : pkt) { char buf[4]; snprintf(buf, sizeof(buf), "%02X ", b); rx += buf; }
+    ESP_LOGD(TAG, "RX offset=0x%02X: %s", byte_offset, rx.c_str());
+
     if (pkt.size() >= 6 && pkt[4] == MODE_READ && pkt[5] == offset_word) {
-      // Payload sits between header bytes and the 2 CRC bytes
       const uint8_t *payload = pkt.data() + 6;
-      size_t payload_len     = pkt.size() - 8;  // strip 6 header + 2 CRC
-
+      size_t payload_len     = pkt.size() - 8;
       size_t end = std::min((size_t)(byte_offset + payload_len), (size_t)BMS_TOTAL_SIZE);
       memcpy(raw_bms_ + byte_offset, payload, end - byte_offset);
       return true;
     }
+    // Got a valid packet but wrong offset – keep waiting
+    ESP_LOGD(TAG, "Packet offset mismatch: got 0x%02X want 0x%02X", pkt[5], offset_word);
   }
   return false;
 }
