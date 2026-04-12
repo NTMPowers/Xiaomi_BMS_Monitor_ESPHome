@@ -65,9 +65,8 @@ void XiaomiBMSComponent::dump_config() {
 
   for (uint8_t i = 0; i < NUM_CELLS; i++) {
     if (cell_voltage_sensors_[i] != nullptr) {
-      char buf[16];
-      snprintf(buf, sizeof(buf), "Cell %d Voltage", i + 1);
-      LOG_SENSOR("  ", buf, cell_voltage_sensors_[i]);
+      ESP_LOGCONFIG(TAG, "  Cell %d Voltage: '%s'", i + 1,
+                    cell_voltage_sensors_[i]->get_name().c_str());
     }
   }
 
