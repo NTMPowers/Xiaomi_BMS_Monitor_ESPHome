@@ -23,6 +23,16 @@ void XiaomiBMSComponent::setup() {
 }
 
 void XiaomiBMSComponent::update() {
+  // Send a short wake burst before every poll – the BMS idles quickly
+  // and needs stimulation before each read cycle.
+  ESP_LOGD(TAG, "Poll cycle – waking BMS");
+  for (uint8_t i = 0; i < 5; i++) {
+    write_array(WAKE_FRAME, sizeof(WAKE_FRAME));
+    delay(40);
+  }
+  delay(150);
+  drain_rx_();
+
   bool all_ok = true;
 
   for (uint8_t i = 0; i < NUM_CHUNKS; i++) {
@@ -90,6 +100,13 @@ void XiaomiBMSComponent::send_wake_() {
     write_array(WAKE_FRAME, sizeof(WAKE_FRAME));
     delay(40);
   }
+  // Drain any garbage the BMS may have sent during wake
+  delay(150);
+  while (available()) read();
+}
+
+void XiaomiBMSComponent::drain_rx_() {
+  while (available()) read();
 }
 
 // Build a read-request frame:
@@ -174,7 +191,16 @@ bool XiaomiBMSComponent::read_chunk_(uint8_t byte_offset, uint8_t size) {
   std::vector<uint8_t> request;
   build_request_(offset_word, size, request);
 
-  flush();
+  // Log the outgoing request frame for debugging
+  std::string hex;
+  for (auto b : request) {
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%02X ", b);
+    hex += buf;
+  }
+  ESP_LOGV(TAG, "TX [offset=0x%02X]: %s", byte_offset, hex.c_str());
+
+  drain_rx_();  // clear stale RX bytes before sending
   write_array(request.data(), request.size());
 
   uint32_t deadline = millis() + 350;  // 350 ms total window (mirrors Python REQUEST_TIMEOUT)

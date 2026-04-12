@@ -124,6 +124,7 @@ class XiaomiBMSComponent : public PollingComponent, public uart::UARTDevice {
  protected:
   // ── internal helpers ──────────────────────────────────────
   void send_wake_();
+  void drain_rx_();
   bool read_chunk_(uint8_t byte_offset, uint8_t size);
   bool read_packet_(uint32_t timeout_ms, std::vector<uint8_t> &out);
   void build_request_(uint8_t offset_word, uint8_t size, std::vector<uint8_t> &frame);
