@@ -9,17 +9,13 @@ namespace xiaomi_bms {
 
 static const char *const TAG = "xiaomi_bms";
 
-// Number of wake frames to send at the start of each poll cycle.
-// Keep this LOW - the BMS responds to each wake frame (20 bytes/response)
-// and the ESP8266 HW UART buffer is only 128 bytes. 3 frames = 60 bytes,
-// leaving room for the buffer to be drained before overflow.
-static const uint8_t  WAKE_COUNT        = 3;
+// Match the reference Python script wake behavior.
+static const uint8_t  WAKE_COUNT        = 30;
 static const uint32_t WAKE_INTERVAL_MS  = 40;
-// Settle time after last wake frame - enough for responses to arrive
-// so we can drain them, but not so long the BMS sleeps again
-static const uint32_t WAKE_SETTLE_MS    = 200;
-// How long to wait for a response to each chunk request
-static const uint32_t CHUNK_TIMEOUT_MS  = 500;
+// Python starts requesting chunks immediately after wake loop.
+static const uint32_t WAKE_SETTLE_MS    = 0;
+// Python REQUEST_TIMEOUT = 0.35s per offset request.
+static const uint32_t CHUNK_TIMEOUT_MS  = 350;
 
 // ─────────────────────────────────────────────────────────────
 //  Lifecycle
@@ -38,8 +34,12 @@ void XiaomiBMSComponent::loop() {
 
     // ── IDLE: wait for next poll interval ───────────────────
     case State::IDLE:
-      if (now - last_poll_ms_ >= update_interval_ms_) {
+      if (wake_needed_) {
         trigger_poll_();
+      } else if (now - last_poll_ms_ >= update_interval_ms_) {
+        chunk_idx_ = 0;
+        send_chunk_request_(chunk_idx_);
+        state_ = State::READING_RESPONSE;
       }
       break;
 
@@ -56,10 +56,9 @@ void XiaomiBMSComponent::loop() {
           wake_next_ms_ = now + WAKE_INTERVAL_MS;
         }
       } else {
-        // All wake frames sent – wait settle time, keep draining, then start chunks
+        // Wake complete: mimic Python by starting chunk requests immediately.
         if (now >= state_deadline_) {
-          // Final drain pass
-          { uint8_t _b; while (available()) read_byte(&_b); }
+          wake_needed_ = false;
           chunk_idx_ = 0;
           send_chunk_request_(chunk_idx_);
           state_ = State::READING_RESPONSE;
@@ -112,7 +111,8 @@ void XiaomiBMSComponent::loop() {
           ESP_LOGW(TAG, "Chunk '%s' timeout, no bytes received",
                    CHUNK_SPECS[chunk_idx_].label);
         }
-        // Retry from beginning with fresh wake
+        // Match Python behavior: re-wake BMS on request failure.
+        wake_needed_ = true;
         trigger_poll_();
       }
       break;
@@ -197,6 +197,7 @@ void XiaomiBMSComponent::process_received_packet_() {
     // Stay in READING_RESPONSE state
   } else {
     // All chunks received
+    last_poll_ms_ = millis();
     state_ = State::PARSE;
   }
 }

@@ -149,6 +149,7 @@ class XiaomiBMSComponent : public Component, public uart::UARTDevice {
   // Wake sub-state
   uint8_t  wake_reps_sent_  = 0;
   uint32_t wake_next_ms_    = 0;
+  bool     wake_needed_     = true;
 
   // Chunk sub-state
   uint8_t  chunk_idx_       = 0;   // which chunk we're currently fetching
