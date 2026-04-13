@@ -12,6 +12,20 @@ namespace xiaomi_bms {
 
 static const char *const TAG = "xiaomi_bms";
 
+static std::string bytes_to_hex_(const std::vector<uint8_t> &data) {
+  std::string out;
+  out.reserve(data.size() * 3);
+  char b[4];
+  for (size_t i = 0; i < data.size(); i++) {
+    snprintf(b, sizeof(b), "%02X", data[i]);
+    out += b;
+    if (i + 1 < data.size()) {
+      out += " ";
+    }
+  }
+  return out;
+}
+
 void XiaomiBMS::set_cell_voltage_sensor(size_t index, sensor::Sensor *sensor) {
   if (index >= this->cell_voltage_sensors_.size()) {
     return;
@@ -66,34 +80,46 @@ bool XiaomiBMS::read_cycle_() {
 }
 
 bool XiaomiBMS::read_chunk_(uint8_t byte_offset, uint8_t size) {
-  std::vector<uint8_t> packet;
   const uint8_t expected_offset = byte_offset / 2;
-  auto request = build_request_(0x01, expected_offset, size);
 
-  while (this->available()) {
-    uint8_t drop;
-    this->read_byte(&drop);
+  for (uint8_t attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      ESP_LOGD(TAG, "Retrying offset 0x%02X after re-wake", expected_offset);
+      this->try_wake_bms_();
+    }
+
+    std::vector<uint8_t> packet;
+    auto request = build_request_(0x01, expected_offset, size);
+    ESP_LOGD(TAG, "TX req offset=0x%02X size=0x%02X attempt=%u frame=%s", expected_offset, size, attempt + 1,
+         bytes_to_hex_(request).c_str());
+
+    while (this->available()) {
+      uint8_t drop;
+      this->read_byte(&drop);
+    }
+
+    this->write_array(request.data(), request.size());
+    this->flush();
+    delay(2);
+
+    if (!this->read_response_for_offset_(expected_offset, packet, 350)) {
+      continue;
+    }
+
+    if (packet.size() < 8) {
+      continue;
+    }
+
+    const auto payload_start = static_cast<size_t>(6);
+    const auto payload_end = packet.size() - 2;
+    const auto payload_len = payload_end - payload_start;
+    const auto max_copy = std::min(payload_len, static_cast<size_t>(RAW_SIZE_ - byte_offset));
+    std::copy(packet.begin() + payload_start, packet.begin() + payload_start + max_copy, this->raw_.begin() + byte_offset);
+    return true;
   }
 
-  this->write_array(request.data(), request.size());
-  this->flush();
-
-  if (!this->read_response_for_offset_(expected_offset, packet, 350)) {
-    ESP_LOGD(TAG, "Timeout waiting for offset 0x%02X", expected_offset);
-    return false;
-  }
-
-  if (packet.size() < 8) {
-    return false;
-  }
-
-  const auto payload_start = static_cast<size_t>(6);
-  const auto payload_end = packet.size() - 2;
-  const auto payload_len = payload_end - payload_start;
-  const auto max_copy = std::min(payload_len, static_cast<size_t>(RAW_SIZE_ - byte_offset));
-  std::copy(packet.begin() + payload_start, packet.begin() + payload_start + max_copy, this->raw_.begin() + byte_offset);
-
-  return true;
+  ESP_LOGD(TAG, "Timeout waiting for offset 0x%02X", expected_offset);
+  return false;
 }
 
 uint16_t XiaomiBMS::calc_crc_(const std::vector<uint8_t> &data) {
@@ -137,6 +163,7 @@ bool XiaomiBMS::read_packet_(std::vector<uint8_t> &out, uint32_t timeout_ms) {
   out.clear();
   uint8_t state = 0;
   const auto start = millis();
+  uint32_t bytes_seen = 0;
 
   while (millis() - start < timeout_ms) {
     if (!this->available()) {
@@ -148,6 +175,7 @@ bool XiaomiBMS::read_packet_(std::vector<uint8_t> &out, uint32_t timeout_ms) {
     if (!this->read_byte(&byte)) {
       continue;
     }
+    bytes_seen++;
 
     if (state == 0) {
       if (byte == 0x55) {
@@ -171,8 +199,17 @@ bool XiaomiBMS::read_packet_(std::vector<uint8_t> &out, uint32_t timeout_ms) {
 
     out.push_back(byte);
     if (out.size() > 8 && static_cast<size_t>(out[2] + 6) == out.size()) {
-      return check_crc_(out);
+      if (!check_crc_(out)) {
+        ESP_LOGW(TAG, "Bad CRC frame: %s", bytes_to_hex_(out).c_str());
+        return false;
+      }
+      ESP_LOGD(TAG, "RX frame ok: %s", bytes_to_hex_(out).c_str());
+      return true;
     }
+  }
+
+  if (bytes_seen == 0) {
+    ESP_LOGD(TAG, "No UART bytes received within %u ms", timeout_ms);
   }
 
   return false;
@@ -192,7 +229,7 @@ bool XiaomiBMS::read_response_for_offset_(uint8_t expected_offset, std::vector<u
       return true;
     }
 
-    ESP_LOGV(TAG, "Ignoring packet mode=0x%02X offset=0x%02X while waiting for 0x%02X", candidate[4], candidate[5], expected_offset);
+    ESP_LOGD(TAG, "Ignoring packet mode=0x%02X offset=0x%02X while waiting for 0x%02X", candidate[4], candidate[5], expected_offset);
   }
 
   return false;
