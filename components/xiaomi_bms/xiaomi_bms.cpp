@@ -47,7 +47,7 @@ void XiaomiBMSComponent::loop() {
     case State::WAKING:
       // Continuously drain RX during wake to prevent buffer overflow.
       // The BMS responds to each wake frame with a 20-byte packet.
-      while (available()) read();
+      { uint8_t _b; while (available()) read_byte(&_b); }
 
       if (wake_reps_sent_ < WAKE_COUNT) {
         if (now >= wake_next_ms_) {
@@ -59,7 +59,7 @@ void XiaomiBMSComponent::loop() {
         // All wake frames sent – wait settle time, keep draining, then start chunks
         if (now >= state_deadline_) {
           // Final drain pass
-          while (available()) read();
+          { uint8_t _b; while (available()) read_byte(&_b); }
           chunk_idx_ = 0;
           send_chunk_request_(chunk_idx_);
           state_ = State::READING_RESPONSE;
@@ -71,7 +71,8 @@ void XiaomiBMSComponent::loop() {
     case State::READING_RESPONSE:
       // Drain all available bytes each loop() call
       while (available()) {
-        uint8_t b = read();
+        uint8_t b;
+        if (!read_byte(&b)) break;
         ESP_LOGD(TAG, "RX byte: 0x%02X (rx_state=%d buf_size=%d)", b, rx_state_, (int)rx_buf_.size());
 
         switch (rx_state_) {
@@ -153,11 +154,13 @@ void XiaomiBMSComponent::send_chunk_request_(uint8_t chunk_idx) {
   ESP_LOGD(TAG, "TX chunk '%s': %s", cs.label, hex.c_str());
 
   // Flush any stale RX bytes before sending
-  while (available()) read();
+  { uint8_t _b; while (available()) read_byte(&_b); }
   rx_buf_.clear();
   rx_state_ = 0;
 
   write_array(frame.data(), frame.size());
+  flush();  // wait for TX to complete before listening - ESP8266 HW UART
+            // disables RX interrupt while TX buffer is non-empty
   chunk_deadline_ = millis() + CHUNK_TIMEOUT_MS;
 }
 
