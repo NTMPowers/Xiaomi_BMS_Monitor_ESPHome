@@ -11,6 +11,7 @@ namespace esphome {
 namespace xiaomi_bms {
 
 static const char *const TAG = "xiaomi_bms";
+static const bool RAW_PROBE_MODE = true;
 
 static std::string bytes_to_hex_(const std::vector<uint8_t> &data) {
   std::string out;
@@ -40,6 +41,45 @@ void XiaomiBMS::dump_config() {
 }
 
 void XiaomiBMS::update() {
+  if (RAW_PROBE_MODE) {
+    this->try_wake_bms_();
+
+    while (this->available()) {
+      uint8_t drop;
+      this->read_byte(&drop);
+    }
+
+    auto request = build_request_(0x01, 0x00, 0x20);
+    ESP_LOGD(TAG, "RAW probe TX: %s", bytes_to_hex_(request).c_str());
+    this->write_array(request.data(), request.size());
+    this->flush();
+
+    const auto start = millis();
+    std::vector<uint8_t> raw;
+    raw.reserve(512);
+    while (millis() - start < 500) {
+      if (!this->available()) {
+        delay(1);
+        continue;
+      }
+      uint8_t byte;
+      if (!this->read_byte(&byte)) {
+        continue;
+      }
+      raw.push_back(byte);
+      if (raw.size() >= 512) {
+        break;
+      }
+    }
+
+    if (raw.empty()) {
+      ESP_LOGW(TAG, "RAW probe RX: no bytes received in 500 ms");
+    } else {
+      ESP_LOGD(TAG, "RAW probe RX (%u bytes): %s", static_cast<unsigned>(raw.size()), bytes_to_hex_(raw).c_str());
+    }
+    return;
+  }
+
   if (!this->initialized_) {
     this->raw_.fill(0);
     this->try_wake_bms_();
