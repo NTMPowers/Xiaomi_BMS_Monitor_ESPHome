@@ -12,20 +12,20 @@ CODEOWNERS = ["@esphome-xiaomi-bms"]
 
 xiaomi_bms_ns = cg.esphome_ns.namespace("xiaomi_bms")
 XiaomiBMSComponent = xiaomi_bms_ns.class_(
-    "XiaomiBMSComponent", cg.PollingComponent, uart.UARTDevice
+    "XiaomiBMSComponent", cg.Component, uart.UARTDevice
 )
 
-# Shared constant re-used by the platform files
 CONF_BMS_ID = "bms_id"
 
 CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(XiaomiBMSComponent),
+            cv.Optional(CONF_UPDATE_INTERVAL, default="5s"): cv.positive_time_period_milliseconds,
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
-    .extend(cv.polling_component_schema("5s"))
+    .extend(cv.COMPONENT_SCHEMA)
 )
 
 
@@ -33,3 +33,4 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+    cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
