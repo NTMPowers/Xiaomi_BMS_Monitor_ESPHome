@@ -9,13 +9,17 @@ namespace xiaomi_bms {
 
 static const char *const TAG = "xiaomi_bms";
 
-// Number of wake frames to send at the start of each poll cycle
-static const uint8_t WAKE_COUNT      = 30;
-static const uint32_t WAKE_INTERVAL_MS = 40;
-// How long to wait after last wake frame before sending first request
-static const uint32_t WAKE_SETTLE_MS  = 150;
+// Number of wake frames to send at the start of each poll cycle.
+// Keep this LOW - the BMS responds to each wake frame (20 bytes/response)
+// and the ESP8266 HW UART buffer is only 128 bytes. 3 frames = 60 bytes,
+// leaving room for the buffer to be drained before overflow.
+static const uint8_t  WAKE_COUNT        = 3;
+static const uint32_t WAKE_INTERVAL_MS  = 40;
+// Settle time after last wake frame - enough for responses to arrive
+// so we can drain them, but not so long the BMS sleeps again
+static const uint32_t WAKE_SETTLE_MS    = 200;
 // How long to wait for a response to each chunk request
-static const uint32_t CHUNK_TIMEOUT_MS = 500;
+static const uint32_t CHUNK_TIMEOUT_MS  = 500;
 
 // ─────────────────────────────────────────────────────────────
 //  Lifecycle
@@ -41,6 +45,10 @@ void XiaomiBMSComponent::loop() {
 
     // ── WAKING: drip-feed wake frames without blocking ──────
     case State::WAKING:
+      // Continuously drain RX during wake to prevent buffer overflow.
+      // The BMS responds to each wake frame with a 20-byte packet.
+      while (available()) read();
+
       if (wake_reps_sent_ < WAKE_COUNT) {
         if (now >= wake_next_ms_) {
           write_array(WAKE_FRAME, sizeof(WAKE_FRAME));
@@ -48,9 +56,10 @@ void XiaomiBMSComponent::loop() {
           wake_next_ms_ = now + WAKE_INTERVAL_MS;
         }
       } else {
-        // All wake frames sent – wait settle time then drain + start first chunk
+        // All wake frames sent – wait settle time, keep draining, then start chunks
         if (now >= state_deadline_) {
-          while (available()) read();  // drain any noise from wake
+          // Final drain pass
+          while (available()) read();
           chunk_idx_ = 0;
           send_chunk_request_(chunk_idx_);
           state_ = State::READING_RESPONSE;
@@ -63,6 +72,7 @@ void XiaomiBMSComponent::loop() {
       // Drain all available bytes each loop() call
       while (available()) {
         uint8_t b = read();
+        ESP_LOGD(TAG, "RX byte: 0x%02X (rx_state=%d buf_size=%d)", b, rx_state_, (int)rx_buf_.size());
 
         switch (rx_state_) {
           case 0:
